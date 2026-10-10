@@ -1,0 +1,4 @@
+# Local SQLite database files.
+sensors.db
+sensors.db-shm
+sensors.db-wal
