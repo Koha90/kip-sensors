@@ -13,22 +13,44 @@ pub struct SqliteSensorStore {
 }
 
 impl SqliteSensorStore {
-    /// Opens a SQLite database and initializes its schema.
+    /// Opens a SQLite database and applies the initial schema.
     ///
-    /// Creates the database file if it does not exist.
-    /// Use `:memory:` to create a temporary in-memory database.
+    /// Creates the database if it does not exist.
+    /// Existing version-0 databases are upgraded to version 1.
     ///
     /// # Errors
     ///
-    /// Returns an error if the database cannot be opened
-    /// or its schema cannot be initialized.
+    /// Returns an error if opening the database or
+    /// initializing its schema fails.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
 
-        // Embed the schema at compile time and execute it.
-        conn.execute_batch(include_str!(
-            "../migrations/001_create_sensors.sql"
-        ))?;
+        // Read the current database schema version.
+        let version: i64 = conn.pragma_query_value(None, "user_version", |row| {
+            row.get(0)
+        })?;
+
+        match version {
+            0 => {
+                let tx = conn.transaction()?;
+
+                tx.execute_batch(include_str!(
+                    "../migrations/001_create_sensors.sql"
+                ))?;
+
+                tx.pragma_update(None, "user_version", 1_i64)?;
+
+                tx.commit()?;
+            }
+
+            1 => {
+                // The database already has the supported schema.
+            }
+
+            other => {
+                return Err(StorageError::UnsupportedSchemaVersion(other));
+            }
+        }
 
         Ok(Self { conn })
     }
@@ -196,6 +218,9 @@ pub enum StorageError {
 
     /// Stored data violates the sensor domain rules.
     InvalidSensor(SensorError),
+
+    /// The database schema version is not supported.
+    UnsupportedSchemaVersion(i64),
 }
 
 impl fmt::Display for StorageError {
@@ -207,6 +232,13 @@ impl fmt::Display for StorageError {
 
             Self::InvalidSensor(err) => {
                 write!(f, "invalid stored sensor: {err}")
+            }
+
+            Self::UnsupportedSchemaVersion(varsion) => {
+                write!(
+                    f,
+                    "unsuppoted database schema version: {varsion}"
+                )
             }
         }
     }
@@ -501,5 +533,85 @@ mod tests {
         assert!(store.search("%")?.is_empty());
 
         Ok(())
+    }
+
+    #[test]
+    fn open_initializes_schema_version() -> StorageResult<()> {
+        let store = SqliteSensorStore::open(":memory:")?;
+
+        let version: i64 = store
+            .conn
+            .pragma_query_value(None, "user_version", |row| {
+                row.get(0)
+            })?;
+
+        assert_eq!(version, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn unfinished_transaction_rolls_back() -> StorageResult<()> {
+        let mut store = SqliteSensorStore::open(":memory:")?;
+
+        {
+            let tx = store.conn.transaction()?;
+
+            tx.execute(
+                "INSERT INTO sensors (id, name, location, status)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![1, "PT-101", "Пастеризатор", "Active"],
+            )?;
+
+            // No commit: the transaction is dropped here.
+        }
+
+        // The insered sensor must not exist after rollback.
+        assert!(store.find(1)?.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn open_rejects_unsupported_schema_version() -> StorageResult<()> {
+        // Create an isolated temporary directory.
+        let dir = tempfile::tempdir().expect("temporary directory must be created");
+
+        // Build the database file path.
+        let db_path = dir
+            .path()
+            .join("sensors_test.db");
+
+        // Create a database with an unsuppoted schema version.
+        let conn = Connection::open(&db_path)?;
+
+        conn.pragma_update(None, "user_version", 99_i64)?;
+
+        // Close the connection before reopening the database.
+        drop(conn);
+
+        // Attempt to open the database through our storage API.
+        let result = SqliteSensorStore::open(&db_path);
+
+        // Verify the exact error variant and its version.
+        assert!(matches!(
+            result,
+            Err(StorageError::UnsupportedSchemaVersion(99))
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn opening_database_after_tempdir_drop_fails() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let db_path = dir.path().join("sensors.db");
+
+        drop(dir);
+
+        let result = rusqlite::Connection::open(&db_path);
+
+        assert!(result.is_err());
     }
 }
