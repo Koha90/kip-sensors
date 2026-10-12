@@ -1,6 +1,7 @@
 //! Domain model for industrial sensors.
 
 use std::fmt;
+use std::str::FromStr;
 
 /// Represents the current operational state of a sensor.
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -11,11 +12,14 @@ pub enum SensorStatus {
     Offline,
 }
 
-/// Errors that may occur while creating a sensor.
+/// Errors that may occur while creating or restoring a sensor.
 #[derive(Debug, PartialEq)]
 pub enum SensorError {
     EmptyName,
     EmptyLocation,
+
+    // The supplied sensor status is not recognized.
+    InvalidStatus(String),
 }
 
 /// Represents an industrial sensor.
@@ -113,6 +117,29 @@ impl Sensor {
     pub fn id(&self) -> u32 {
         self.id
     }
+
+    /// Restores a sensor from previously persisted data.
+    ///
+    /// Applies the same name and location validation as `new()`,
+    /// while preserving the stored operational status.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the name or location is empty.
+    pub fn restore(
+        id: u32,
+        name: String,
+        location: String,
+        status: SensorStatus,
+    ) -> Result<Self, SensorError> {
+        let mut sensor = Self::new(id, name, location)?;
+
+        // The regular constructor sets Active.
+        // Restoring must preserve the persisted status instead.
+        sensor.status = status;
+
+        Ok(sensor)
+    }
 }
 
 impl fmt::Display for SensorError {
@@ -120,6 +147,30 @@ impl fmt::Display for SensorError {
         match self {
             SensorError::EmptyName => write!(f, "sensor name is empty"),
             SensorError::EmptyLocation => write!(f, "sensor location is empty"),
+            SensorError::InvalidStatus(status) => {
+                write!(
+                    f,
+                    "invalid sensor status: {}",
+                    status
+                )
+            }
+        }
+    }
+}
+
+impl FromStr for SensorStatus {
+    type Err = SensorError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "Active" => Ok(Self::Active),
+            "Maintenance" => Ok(Self::Maintenance),
+            "Failed" => Ok(Self::Failed),
+            "Offline" => Ok(Self::Offline),
+
+            other => Err(SensorError::InvalidStatus(
+                other.to_string(),
+            )),
         }
     }
 }
@@ -165,6 +216,53 @@ mod tests {
         assert_eq!(
             result,
             Err(SensorError::EmptyLocation)
+        );
+    }
+
+    #[test]
+    fn sensor_status_round_trip() {
+        let statuses = [
+            SensorStatus::Active,
+            SensorStatus::Maintenance,
+            SensorStatus::Failed,
+            SensorStatus::Offline,
+        ];
+
+        for status in statuses {
+            let text = status.to_string();
+
+            let restored = text.parse::<SensorStatus>();
+
+            assert_eq!(restored, Ok(status));
+        }
+    }
+
+    #[test]
+    fn invalid_sensor_status_returns_error() {
+        let result = "Archive".parse::<SensorStatus>();
+
+        assert_eq!(
+            result,
+            Err(SensorError::InvalidStatus(
+                "Archive".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn restore_preserves_sensor_status() {
+        let sensor = Sensor::restore(
+            1,
+            "PT-101".to_string(),
+            "Пастеризатор".to_string(),
+            SensorStatus::Maintenance,
+        )
+        .expect("sensor must be created");
+
+        assert_eq!(sensor.id(), 1);
+        assert_eq!(
+            sensor.status(),
+            SensorStatus::Maintenance
         );
     }
 }

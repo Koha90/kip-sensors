@@ -1,0 +1,1 @@
+std::result::Result<std::option::Option<kip_sensors::sensor::Sensor>, kip_sensors::storage::StorageError>

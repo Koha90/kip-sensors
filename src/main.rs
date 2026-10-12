@@ -1,51 +1,44 @@
-use std::env;
+//! CLI entry point for the sensor catalog.
 
-use kip_sensors::catalog::SensorCatalog;
+use std::env;
+use std::process::ExitCode;
+
+use kip_sensors::app_error::AppError;
 use kip_sensors::cli::{self, Command};
 use kip_sensors::sensor::Sensor;
 use kip_sensors::storage::SqliteSensorStore;
 
-fn main() {
-    let mut catalog = SensorCatalog::new();
-
-    let sensors = [
-        Sensor::new(
-            1,
-            "PT-101".to_string(),
-            "Пастеризатор, линия 1".to_string(),
-        ),
-        Sensor::new(
-            2,
-            "PT-202".to_string(),
-            "Танк хранения".to_string(),
-        ),
-        Sensor::new(
-            3,
-            "PT-303".to_string(),
-            "Приёмный резервуар".to_string(),
-        ),
-    ];
-
-    for sensor in sensors {
-        match sensor {
-            Ok(sensor) => {
-                if let Err(err) = catalog.add(sensor) {
-                    println!("Ошибка каталога: {}", err);
-                }
-            }
-            Err(err) => {
-                println!("Ошибка датчика: {}", err);
-            }
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("Ошибка: {err}");
+            ExitCode::FAILURE
         }
     }
+}
 
+/// Executes a CLI command against persistent storage.
+fn run() -> Result<(), AppError> {
     let args: Vec<String> = env::args().collect();
 
-    match cli::parse(&args) {
-        Ok(Command::List) => {
-            for sensor in catalog.sensors() {
+    // Validate user input before opening the database.
+    let command = cli::parse(&args)?;
+
+    // Open the persistent database.
+    let store = SqliteSensorStore::open("sensors.db")?;
+
+    match command {
+        Command::List => {
+            let sesnors = store.list()?;
+
+            if sesnors.is_empty() {
+                println!("Каталог датчиков пуст");
+            }
+
+            for sensor in sesnors {
                 println!(
-                    "{:>3} | {:<10} | {:<30} | {:<12}",
+                    "{:>3} | {:<10} | {:<30} | {:12}",
                     sensor.id(),
                     sensor.name(),
                     sensor.location(),
@@ -54,54 +47,36 @@ fn main() {
             }
         }
 
-        Ok(Command::Show(id)) => match catalog.find(id) {
-            Some(sensor) => {
-                println!("ID: {}", sensor.id());
-                println!("Датчик: {}", sensor.name());
-                println!(
-                    "Расположение: {}",
-                    sensor.location()
-                );
-                println!("Статус: {}", sensor.status());
-            }
+        Command::Show(id) => {
+            let sensor = store
+                .find(id)?
+                .ok_or(AppError::NotFound(id))?;
 
-            None => {
-                println!("Дачик с ID {} не найден", id);
-            }
-        },
-        Err(err) => {
-            println!("Ошибка: {}", err);
+            println!("ID: {}", sensor.id());
+            println!("Датчик: {}", sensor.name());
+            println!(
+                "Расположение: {}",
+                sensor.location()
+            );
+            println!("Статус: {}", sensor.status());
         }
 
-        Ok(Command::Remove(id)) => match catalog.remove(id) {
-            Some(sensor) => {
-                println!(
-                    "Датчик {} с ID {} удалён",
-                    sensor.name(),
-                    sensor.id()
-                );
-            }
+        Command::Add { id, name, location } => {
+            let sensor = Sensor::new(id, name, location)?;
 
-            None => {
-                println!("Датчик с ID {} не найден", id)
-            }
-        },
+            store.insert(&sensor)?;
 
-        Ok(Command::Add { id, name, location }) => match Sensor::new(id, name, location) {
-            Ok(sensor) => {
-                if let Err(err) = catalog.add(sensor) {
-                    println!("Ошибка каталога: {}", err);
-                } else {
-                    println!("Датчик добавлен");
-                }
-            }
+            println!("Датчик {} добавлен", sensor.name());
+        }
 
-            Err(err) => {
-                println!("Ошибка датчика: {}", err);
+        Command::Remove(id) => {
+            if store.remove(id)? {
+                println!("Датчик с ID {id} удалён");
+            } else {
+                return Err(AppError::NotFound(id));
             }
-        },
+        }
     }
 
-    let _store =
-        SqliteSensorStore::open("sensors.db").expect("failed to initialize sensor database");
+    Ok(())
 }

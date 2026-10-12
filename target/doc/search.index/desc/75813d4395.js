@@ -1,0 +1,1 @@
+rd_("AeCreates a new sensor.AkMarks the sensor as failed.AoReturns the argument unchanged.00BaCalls <code>U::from(self)</code>.00B`Represents an industrial sensor.BdDomain model for industrial sensors.BnErrors that may occur while creating a sensor.CeRepresents the current operational state of a sensor.")

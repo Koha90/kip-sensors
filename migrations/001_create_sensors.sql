@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS sensors (
     status TEXT NOT NULL
         CHECK (
             status IN (
-                'Archive',
+                'Active',
                 'Maintenance',
                 'Failed',
                 'Offline'
