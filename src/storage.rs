@@ -7,50 +7,43 @@ use rusqlite::{Connection, OptionalExtension, Params, params};
 
 use crate::sensor::{Sensor, SensorError, SensorStatus};
 
+use rusqlite_migration::{M, Migrations};
+
+/// Ordered database schema migrations.
+///
+/// Migration positions correspond to database schema versions.
+/// Existing migrations must not be reordered or modified
+/// after they have been applied.
+const MIGRATION_STEPS: &[M<'static>] = &[
+    M::up(include_str!(
+        "../migrations/001_create_sensors.sql"
+    )),
+    M::up(include_str!(
+        "../migrations/002_create_sensor_models.sql"
+    )),
+];
+
+/// Database migrator used to apply pending schema chanes.
+const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_STEPS);
+
 /// Manages the SQLite database used by the sensor catalog.
 pub struct SqliteSensorStore {
     conn: Connection,
 }
 
 impl SqliteSensorStore {
-    /// Opens a SQLite database and applies the initial schema.
-    ///
-    /// Creates the database if it does not exist.
-    /// Existing version-0 databases are upgraded to version 1.
+    /// Opens a SQLite database and applies pending migrations.
     ///
     /// # Errors
     ///
-    /// Returns an error if opening the database or
-    /// initializing its schema fails.
+    /// Returns an error if the database cannot be opened,
+    /// migrated, or has an unsuppoted schema version.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
         let mut conn = Connection::open(path)?;
 
-        // Read the current database schema version.
-        let version: i64 = conn.pragma_query_value(None, "user_version", |row| {
-            row.get(0)
-        })?;
+        MIGRATIONS.to_latest(&mut conn)?;
 
-        match version {
-            0 => {
-                let tx = conn.transaction()?;
-
-                tx.execute_batch(include_str!(
-                    "../migrations/001_create_sensors.sql"
-                ))?;
-
-                tx.pragma_update(None, "user_version", 1_i64)?;
-
-                tx.commit()?;
-            }
-
-            1 => {
-                // The database already has the supported schema.
-            }
-
-            other => {
-                return Err(StorageError::UnsupportedSchemaVersion(other));
-            }
-        }
+        conn.pragma_update(None, "foreign_keys", "ON")?;
 
         Ok(Self { conn })
     }
@@ -219,8 +212,8 @@ pub enum StorageError {
     /// Stored data violates the sensor domain rules.
     InvalidSensor(SensorError),
 
-    /// The database schema version is not supported.
-    UnsupportedSchemaVersion(i64),
+    /// Database schema migration failed.
+    Migration(rusqlite_migration::Error),
 }
 
 impl fmt::Display for StorageError {
@@ -234,10 +227,10 @@ impl fmt::Display for StorageError {
                 write!(f, "invalid stored sensor: {err}")
             }
 
-            Self::UnsupportedSchemaVersion(varsion) => {
+            Self::Migration(err) => {
                 write!(
                     f,
-                    "unsuppoted database schema version: {varsion}"
+                    "database migration error: {err}"
                 )
             }
         }
@@ -253,6 +246,12 @@ impl From<rusqlite::Error> for StorageError {
 impl From<SensorError> for StorageError {
     fn from(err: SensorError) -> Self {
         Self::InvalidSensor(err)
+    }
+}
+
+impl From<rusqlite_migration::Error> for StorageError {
+    fn from(err: rusqlite_migration::Error) -> Self {
+        Self::Migration(err)
     }
 }
 
@@ -545,7 +544,7 @@ mod tests {
                 row.get(0)
             })?;
 
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
 
         Ok(())
     }
@@ -596,7 +595,11 @@ mod tests {
         // Verify the exact error variant and its version.
         assert!(matches!(
             result,
-            Err(StorageError::UnsupportedSchemaVersion(99))
+            Err(StorageError::Migration(
+                rusqlite_migration::Error::MigrationDefinition(
+                    rusqlite_migration::MigrationDefinitionError::DatabaseTooFarAhead
+                )
+            ))
         ));
 
         Ok(())
@@ -613,5 +616,12 @@ mod tests {
         let result = rusqlite::Connection::open(&db_path);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn migrations_are_valid() {
+        MIGRATIONS
+            .validate()
+            .expect("all migrations must be valid");
     }
 }
