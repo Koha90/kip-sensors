@@ -1,6 +1,6 @@
-use std::fmt::{self};
+use std::fmt;
 
-/// Represents a parsed CLI cammand.
+/// Represents a parsed CLI command.
 #[derive(Debug, PartialEq)]
 pub enum Command {
     /// Lists all sensors.
@@ -18,6 +18,9 @@ pub enum Command {
         name: String,
         location: String,
     },
+
+    /// Searches sensors by name or installation location.
+    Search(String),
 }
 
 /// Represents errors that may occur while parsing CLI arguments.
@@ -29,7 +32,7 @@ pub enum CliError {
     /// The command is not supported.
     UnknownCommand(String),
 
-    /// A command requires a sensor ID, but it was not found provided.
+    /// A command requires a sensor ID, but it was not provided.
     MissingId,
 
     /// The sensor ID could not be parsed as `u32`.
@@ -40,6 +43,12 @@ pub enum CliError {
 
     /// A command requires a sensor location, but it was not provided.
     MissingLocation,
+
+    /// A search command was provided without a query.
+    MissingQuery,
+
+    /// A search query contains only whitespace.
+    EmptyQuery,
 }
 
 impl fmt::Display for CliError {
@@ -68,6 +77,14 @@ impl fmt::Display for CliError {
             CliError::MissingLocation => {
                 write!(f, "sensor location is missing")
             }
+
+            CliError::MissingQuery => {
+                write!(f, "search query is missing")
+            }
+
+            CliError::EmptyQuery => {
+                write!(f, "search query must not be empty")
+            }
         }
     }
 }
@@ -82,13 +99,16 @@ impl fmt::Display for CliError {
 /// - [`CliError::MissingId`] if `show` is used without an ID.
 /// - [`CliError::InvalidId`] if the ID is not a valid `u32`.
 /// - [`CliError::MissingName`] if a required sensor name is missing.
-/// - [`CliError::MissingLocation`] if a reqired sensor location is missing.
+/// - [`CliError::MissingLocation`] if a required sensor location is missing.
+/// - [`CliError::MissingQuery`] if a required query is missing.
+/// - [`CliError::EmptyQuery`] if a required query has only whitespace.
 ///
 /// Expected arguments layouts:
 /// - `kip-sensors list`
 /// - `kip-sensors show <id>`
 /// - `kip-sensors remove <id>`
 /// - `kip-sensors add <id> <name> <location>`
+/// - `kip-sensors search <query>`
 pub fn parse(args: &[String]) -> Result<Command, CliError> {
     let command = args
         .get(1)
@@ -123,6 +143,20 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
             Ok(Command::Add { id, name, location })
         }
 
+        "search" => {
+            let query = args
+                .get(2)
+                .ok_or(CliError::MissingQuery)?;
+
+            let query = query.trim();
+
+            if query.is_empty() {
+                return Err(CliError::EmptyQuery);
+            }
+
+            Ok(Command::Search(query.to_owned()))
+        }
+
         command => Err(CliError::UnknownCommand(
             command.to_string(),
         )),
@@ -135,7 +169,7 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
 ///
 /// Returns:
 /// - [`CliError::MissingId`] if the argument is missing.
-/// - [`CliError:InvalidId`] if the value is not a valid `u32`.
+/// - [`CliError::InvalidId`] if the value is not a valid `u32`.
 fn parse_id(args: &[String]) -> Result<u32, CliError> {
     let id = args
         .get(2)
@@ -306,6 +340,46 @@ mod tests {
         assert_eq!(
             parse(&args),
             Err(CliError::MissingLocation)
+        );
+    }
+
+    #[test]
+    fn parse_search_command() {
+        let args = vec![
+            "kip-sensors".to_string(),
+            "search".to_string(),
+            " Пастеризатор  ".to_string(),
+        ];
+
+        assert_eq!(
+            parse(&args),
+            Ok(Command::Search(
+                "Пастеризатор".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_search_without_query_returns_error() {
+        let args = vec!["kip-sensors".to_string(), "search".to_string()];
+
+        assert_eq!(
+            parse(&args),
+            Err(CliError::MissingQuery)
+        );
+    }
+
+    #[test]
+    fn parse_search_with_blank_query_returns_error() {
+        let args = vec![
+            "kip-sensors".to_string(),
+            "search".to_string(),
+            "   ".to_string(),
+        ];
+
+        assert_eq!(
+            parse(&args),
+            Err(CliError::EmptyQuery)
         );
     }
 }

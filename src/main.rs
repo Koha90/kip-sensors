@@ -30,20 +30,12 @@ fn run() -> Result<(), AppError> {
 
     match command {
         Command::List => {
-            let sesnors = store.list()?;
+            let sensors = store.list()?;
 
-            if sesnors.is_empty() {
+            if sensors.is_empty() {
                 println!("Каталог датчиков пуст");
-            }
-
-            for sensor in sesnors {
-                println!(
-                    "{:>3} | {:<10} | {:<30} | {:12}",
-                    sensor.id(),
-                    sensor.name(),
-                    sensor.location(),
-                    sensor.status(),
-                );
+            } else {
+                print_sensor_rows(&sensors);
             }
         }
 
@@ -76,7 +68,30 @@ fn run() -> Result<(), AppError> {
                 return Err(AppError::NotFound(id));
             }
         }
+
+        Command::Search(query) => {
+            let sensors = store.search(&query)?;
+
+            if sensors.is_empty() {
+                println!("По запросу «{query}» ничего не найдено");
+            } else {
+                print_sensor_rows(&sensors);
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Prints sensor records as formatted terminal rows.
+fn print_sensor_rows(sensors: &[Sensor]) {
+    for sensor in sensors {
+        println!(
+            "{:>3} | {:<10} | {:<30} | {:<12}",
+            sensor.id(),
+            sensor.name(),
+            sensor.location(),
+            sensor.status(),
+        );
+    }
 }
