@@ -2,3 +2,4 @@
 sensors.db
 sensors.db-shm
 sensors.db-wal
+sensors.db.bak

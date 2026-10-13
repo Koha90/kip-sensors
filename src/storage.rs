@@ -6,6 +6,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, Params, params};
 
 use crate::sensor::{Sensor, SensorError, SensorStatus};
+use crate::sensor_model::{SensorModel, SensorModelError};
 
 use rusqlite_migration::{M, Migrations};
 
@@ -23,7 +24,7 @@ const MIGRATION_STEPS: &[M<'static>] = &[
     )),
 ];
 
-/// Database migrator used to apply pending schema chanes.
+/// Database migrator used to apply pending schema changes.
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_STEPS);
 
 /// Manages the SQLite database used by the sensor catalog.
@@ -37,7 +38,7 @@ impl SqliteSensorStore {
     /// # Errors
     ///
     /// Returns an error if the database cannot be opened,
-    /// migrated, or has an unsuppoted schema version.
+    /// migrated, or has an unsupported schema version.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
         let mut conn = Connection::open(path)?;
 
@@ -201,6 +202,68 @@ impl SqliteSensorStore {
 
         Ok(sensors)
     }
+
+    /// Inserts a sensor model into the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the insert fails.
+    pub fn insert_model(&self, model: &SensorModel) -> StorageResult<()> {
+        self.conn.execute(
+            "INSERT INTO sensor_models (id, manufacturer, model, part_number)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                model.id(),
+                model.manufacturer(),
+                model.model(),
+                model.part_number(),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Finds a stored sensor model by its ID.
+    ///
+    /// Returns `None` if the model does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails
+    /// or stored model data violates domain rules.
+    pub fn find_model(&self, id: u32) -> StorageResult<Option<SensorModel>> {
+        let record: Option<(u32, String, String, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT id, manufacturer, model, part_number
+                 FROM sensor_models
+                 WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((id, manufacturer, model, part_number)) = record else {
+            return Ok(None);
+        };
+
+        // Restore the validated domain model.
+        let sensor_model = SensorModel::new(
+            id,
+            manufacturer,
+            model,
+            part_number,
+        )?;
+
+        Ok(Some(sensor_model))
+    }
 }
 
 /// Errors that may occur while accessing stored sensors.
@@ -214,6 +277,9 @@ pub enum StorageError {
 
     /// Database schema migration failed.
     Migration(rusqlite_migration::Error),
+
+    /// Store model data violates domain rules.
+    InvalidModel(SensorModelError),
 }
 
 impl fmt::Display for StorageError {
@@ -231,6 +297,13 @@ impl fmt::Display for StorageError {
                 write!(
                     f,
                     "database migration error: {err}"
+                )
+            }
+
+            Self::InvalidModel(err) => {
+                write!(
+                    f,
+                    "invalid store sensor model: {err}"
                 )
             }
         }
@@ -252,6 +325,12 @@ impl From<SensorError> for StorageError {
 impl From<rusqlite_migration::Error> for StorageError {
     fn from(err: rusqlite_migration::Error) -> Self {
         Self::Migration(err)
+    }
+}
+
+impl From<SensorModelError> for StorageError {
+    fn from(err: SensorModelError) -> Self {
+        Self::InvalidModel(err)
     }
 }
 
@@ -623,5 +702,196 @@ mod tests {
         MIGRATIONS
             .validate()
             .expect("all migrations must be valid");
+    }
+
+    #[test]
+    fn insert_sensor_model_success() -> StorageResult<()> {
+        let store = SqliteSensorStore::open(":memory:")?;
+
+        let sensor_model = SensorModel::new(
+            1,
+            "WIKA".to_string(),
+            "A-10".to_string(),
+            Some("A-10-123".to_string()),
+        )
+        .expect("sensor model must be created");
+
+        store.insert_model(&sensor_model)?;
+
+        let (manufacturer, model, part_number): (String, String, Option<String>) =
+            store.conn.query_row(
+                "SELECT manufacturer, model, part_number FROM sensor_models WHERE id = ?1",
+                [1],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                    ))
+                },
+            )?;
+
+        assert_eq!(manufacturer, "WIKA");
+        assert_eq!(model, "A-10");
+        assert_eq!(
+            part_number,
+            Some("A-10-123".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn insert_sensor_model_without_part_number() -> StorageResult<()> {
+        let store = SqliteSensorStore::open(":memory:")?;
+
+        let sensor_model = SensorModel::new(
+            1,
+            "WIKA".to_string(),
+            "A-10".to_string(),
+            None,
+        )
+        .expect("sensor model must be created");
+
+        store.insert_model(&sensor_model)?;
+
+        let part_number: Option<String> = store.conn.query_row(
+            "SELECT part_number FROM sensor_models WHERE id = ?1",
+            [1],
+            |row| row.get(0),
+        )?;
+
+        assert!(part_number.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn insert_duplicate_id_sensor_model_returns_error() -> StorageResult<()> {
+        let store = SqliteSensorStore::open(":memory:")?;
+
+        let sensor_model = SensorModel::new(
+            1,
+            "WIKA".to_string(),
+            "A-10".to_string(),
+            Some("A-10-123".to_string()),
+        )
+        .expect("sensor model must be created");
+
+        store.insert_model(&sensor_model)?;
+
+        let result = store.insert_model(&sensor_model);
+
+        assert!(matches!(
+                result,
+                Err(StorageError::Database(
+                        rusqlite::Error::SqliteFailure(err, _)
+                ))
+                    if err.extended_code
+                        == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn find_model_without_part_number() -> StorageResult<()> {
+        let store = SqliteSensorStore::open(":memory:")?;
+
+        let model = SensorModel::new(
+            1,
+            "WIKA".to_string(),
+            "A-10".to_string(),
+            None,
+        )
+        .expect("sensor model must be created");
+
+        store.insert_model(&model)?;
+
+        let restored = store
+            .find_model(1)?
+            .expect("sensor model must be found");
+
+        assert_eq!(restored.id(), 1);
+        assert_eq!(restored.manufacturer(), "WIKA");
+        assert_eq!(restored.model(), "A-10");
+        assert_eq!(restored.part_number(), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn find_existing_sensor_model() -> StorageResult<()> {
+        let store = SqliteSensorStore::open(":memory:")?;
+
+        let sensor_model = SensorModel::new(
+            1,
+            "WIKA".to_string(),
+            "A-10".to_string(),
+            Some("A-10-123".to_string()),
+        )
+        .expect("sensor model must be created");
+
+        store.insert_model(&sensor_model)?;
+
+        let restored = store
+            .find_model(1)?
+            .expect("sensor model must be found");
+
+        assert_eq!(restored.id(), 1);
+        assert_eq!(restored.manufacturer(), "WIKA");
+        assert_eq!(restored.model(), "A-10");
+        assert_eq!(
+            restored.part_number(),
+            Some("A-10-123"),
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn find_missing_sensor_model_returns_none() -> StorageResult<()> {
+        let store = SqliteSensorStore::open(":memory:")?;
+
+        let sensor_model = SensorModel::new(
+            1,
+            "WIKA".to_string(),
+            "A-10".to_string(),
+            Some("A-10-123".to_string()),
+        )
+        .expect("sensor model must be created");
+
+        store.insert_model(&sensor_model)?;
+
+        let result = store.find_model(42)?;
+
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn find_invalid_sensor_model_returns_error() -> StorageResult<()> {
+        let store = SqliteSensorStore::open(":memory:")?;
+
+        // Bypass the domain constructor to simulate invalid stored data.
+        store.conn.execute(
+            "INSERT INTO sensor_models
+             (id, manufacturer, model, part_number)
+             VALUES (?1, ?2, ?3, NULL)",
+            params![1, "", "A-10"],
+        )?;
+
+        // Restoring the record must fail domain validation.
+        let result = store.find_model(1);
+
+        assert!(matches!(
+            result,
+            Err(StorageError::InvalidModel(
+                SensorModelError::EmptyManufacturer
+            ))
+        ));
+
+        Ok(())
     }
 }
