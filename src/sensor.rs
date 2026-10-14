@@ -29,6 +29,8 @@ pub struct Sensor {
     name: String,
     location: String,
     status: SensorStatus,
+
+    model_id: Option<u32>,
 }
 
 impl fmt::Display for SensorStatus {
@@ -60,6 +62,7 @@ impl Sensor {
             name,
             location,
             status: SensorStatus::Active,
+            model_id: None,
         })
     }
 
@@ -131,6 +134,7 @@ impl Sensor {
         name: String,
         location: String,
         status: SensorStatus,
+        model_id: Option<u32>,
     ) -> Result<Self, SensorError> {
         let mut sensor = Self::new(id, name, location)?;
 
@@ -138,7 +142,28 @@ impl Sensor {
         // Restoring must preserve the persisted status instead.
         sensor.status = status;
 
+        sensor.model_id = model_id;
+
         Ok(sensor)
+    }
+
+    /// Returns the identifier of the assigned sensor model.
+    ///
+    /// Returns `None` when no model has been assigned.
+    pub fn model_id(&self) -> Option<u32> {
+        self.model_id
+    }
+
+    /// Assigns a models identifier to this sensor.
+    ///
+    /// Model existence must be verified by the storage layer.
+    pub fn assign_model(&mut self, model_id: u32) {
+        self.model_id = Some(model_id);
+    }
+
+    /// Removes the assigned model identifier.
+    pub fn clear_model(&mut self) {
+        self.model_id = None;
     }
 }
 
@@ -256,6 +281,7 @@ mod tests {
             "PT-101".to_string(),
             "Пастеризатор".to_string(),
             SensorStatus::Maintenance,
+            None,
         )
         .expect("sensor must be created");
 
@@ -264,5 +290,43 @@ mod tests {
             sensor.status(),
             SensorStatus::Maintenance
         );
+    }
+
+    #[test]
+    fn sensor_model_can_be_assigned() -> Result<(), SensorError> {
+        let mut sensor = Sensor::new(
+            1,
+            "PT-101".to_string(),
+            "Пастеризатор".to_string(),
+        )?;
+
+        assert_eq!(sensor.model_id(), None);
+
+        sensor.assign_model(7);
+
+        assert_eq!(sensor.model_id(), Some(7));
+
+        Ok(())
+    }
+
+    #[test]
+    fn sensor_model_can_be_cleared() -> Result<(), SensorError> {
+        let mut sensor = Sensor::new(
+            1,
+            "PT-101".to_string(),
+            "Пастеризатор".to_string(),
+        )?;
+
+        assert_eq!(sensor.model_id(), None);
+
+        sensor.assign_model(7);
+
+        assert_eq!(sensor.model_id(), Some(7));
+
+        sensor.clear_model();
+
+        assert_eq!(sensor.model_id(), None);
+
+        Ok(())
     }
 }

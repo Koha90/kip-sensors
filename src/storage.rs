@@ -53,17 +53,18 @@ impl SqliteSensorStore {
     ///
     /// # Errors
     ///
-    /// Returns an error if the insert fails, including when
-    /// a sensor with the same ID already exists.
+    /// Returns an error if the insert fails, including
+    /// duplicate IDs or invalid model references..
     pub fn insert(&self, sensor: &Sensor) -> StorageResult<()> {
         self.conn.execute(
-            "INSERT INTO sensors (id, name, location, status)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO sensors (id, name, location, status, model_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 sensor.id(),
                 sensor.name(),
                 sensor.location(),
                 sensor.status().to_string(),
+                sensor.model_id(),
             ],
         )?;
 
@@ -79,10 +80,16 @@ impl SqliteSensorStore {
     /// Returns an error if the query fails or stored data
     /// cannot be restored into a valid Sensor.
     pub fn find(&self, id: u32) -> StorageResult<Option<Sensor>> {
-        let record: Option<(u32, String, String, String)> = self
+        let record: Option<(
+            u32,
+            String,
+            String,
+            String,
+            Option<u32>,
+        )> = self
             .conn
             .query_row(
-                "SELECT id, name, location, status
+                "SELECT id, name, location, status, model_id
                  FROM sensors
                  WHERE id = ?1",
                 [id],
@@ -92,18 +99,21 @@ impl SqliteSensorStore {
                         row.get(1)?,
                         row.get(2)?,
                         row.get(3)?,
+                        row.get(4)?,
                     ))
                 },
             )
             .optional()?;
 
-        let Some((id, name, location, status)) = record else {
+        let Some((id, name, location, status, model_id)) = record else {
             return Ok(None);
         };
 
         let status = status.parse::<SensorStatus>()?;
 
-        let sensor = Sensor::restore(id, name, location, status)?;
+        let sensor = Sensor::restore(
+            id, name, location, status, model_id,
+        )?;
 
         Ok(Some(sensor))
     }
@@ -118,7 +128,7 @@ impl SqliteSensorStore {
     /// sensor cannot be restored.
     pub fn list(&self) -> StorageResult<Vec<Sensor>> {
         self.query_sensor(
-            "SELECT id, name, location, status
+            "SELECT id, name, location, status, model_id
              FROM sensors
              ORDER BY id",
             [],
@@ -145,7 +155,7 @@ impl SqliteSensorStore {
         }
 
         self.query_sensor(
-            "SELECT id, name, location, status
+            "SELECT id, name, location, status, model_id
              FROM sensors
              WHERE instr(name, ?1) > 0
                 OR instr(location, ?1) > 0
@@ -184,18 +194,21 @@ impl SqliteSensorStore {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, Option<u32>>(4)?,
             ))
         })?;
 
         let mut sensors = Vec::new();
 
         for row in rows {
-            let (id, name, location, raw_status) = row?;
+            let (id, name, location, raw_status, model_id) = row?;
 
             // Convert SQL text into a validated domain status.
             let status = raw_status.parse::<SensorStatus>()?;
 
-            let sensor = Sensor::restore(id, name, location, status)?;
+            let sensor = Sensor::restore(
+                id, name, location, status, model_id,
+            )?;
 
             sensors.push(sensor);
         }
@@ -485,6 +498,17 @@ mod tests {
 
         first.maintenance();
 
+        let model = SensorModel::new(
+            7,
+            "WIKA".to_string(),
+            "A-10".to_string(),
+            Some("A-10-123".to_string()),
+        )?;
+
+        store.insert_model(&model)?;
+
+        first.assign_model(model.id());
+
         // Insert in reverse order to verify SQL sorting.
         store.insert(&second)?;
         store.insert(&first)?;
@@ -506,6 +530,8 @@ mod tests {
             sensors[1].status(),
             SensorStatus::Active
         );
+        assert_eq!(sensors[0].model_id(), Some(7));
+        assert_eq!(sensors[1].model_id(), None);
 
         Ok(())
     }
@@ -548,7 +574,7 @@ mod tests {
     fn search_matches_name_and_location() -> StorageResult<()> {
         let store = SqliteSensorStore::open(":memory:")?;
 
-        let sensors = [
+        let mut sensors = [
             Sensor::new(
                 1,
                 "PT-101".to_string(),
@@ -566,6 +592,17 @@ mod tests {
             )?,
         ];
 
+        let model = SensorModel::new(
+            7,
+            "WIKA".to_string(),
+            "A-10".to_string(),
+            Some("A-10-123".to_string()),
+        )?;
+
+        store.insert_model(&model)?;
+
+        sensors[0].assign_model(model.id());
+
         // Arrange: persist all test sensors.
         for sensor in &sensors {
             store.insert(sensor)?;
@@ -578,6 +615,9 @@ mod tests {
         assert_eq!(by_location[0].id(), 1);
         assert_eq!(by_location[1].id(), 3);
 
+        assert_eq!(by_location[0].model_id(), Some(7));
+        assert_eq!(by_location[1].model_id(), None);
+
         // Act: search by sensor name.
         let by_name = store.search("PT")?;
 
@@ -585,6 +625,8 @@ mod tests {
         assert_eq!(by_name[0].id(), 1);
         assert_eq!(by_name[1].id(), 2);
 
+        assert_eq!(by_name[0].model_id(), Some(7));
+        assert_eq!(by_name[1].model_id(), None);
         Ok(())
     }
 
@@ -891,6 +933,155 @@ mod tests {
                 SensorModelError::EmptyManufacturer
             ))
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn sensor_cannot_reference_missing_model() -> StorageResult<()> {
+        let store = SqliteSensorStore::open(":memory:")?;
+
+        let sensor = Sensor::new(
+            1,
+            "PT-101".to_string(),
+            "Пастеризатор".to_string(),
+        )?;
+
+        store.insert(&sensor)?;
+
+        // Try to reference a model that does not exist.
+        let result = store.conn.execute(
+            "UPDATE sensors SET model_id = ?1 WHERE id = ?2",
+            params![999, 1],
+        );
+
+        assert!(matches!(
+                result,
+                Err(rusqlite::Error::SqliteFailure(err, _))
+                if err.extended_code
+                == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
+        ));
+
+        // Verify that the rejected UPDATE did not change the record.
+        let model_id: Option<u32> = store.conn.query_row(
+            "SELECT model_id FROM sensors WHERE id = ?1",
+            [1],
+            |row| row.get(0),
+        )?;
+
+        assert_eq!(model_id, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn insert_sensor_with_model() -> StorageResult<()> {
+        let store = SqliteSensorStore::open(":memory:")?;
+
+        // Arrange: create and persist a sensor model.
+        let model = SensorModel::new(
+            7,
+            "WIKA".to_string(),
+            "A-10".to_string(),
+            None,
+        )
+        .expect("sensor model must be created");
+
+        store.insert_model(&model)?;
+
+        // Arrange: assign the existing model to a sensor.
+        let mut sensor = Sensor::new(
+            1,
+            "PT-101".to_string(),
+            "Пастеризатор".to_string(),
+        )?;
+
+        sensor.assign_model(model.id());
+
+        // Act: persist the sensor.
+        store.insert(&sensor)?;
+
+        // Assert: the relationship is stored in SQLite.
+        let saved_model_id: Option<u32> = store.conn.query_row(
+            "SELECT model_id FROM sensors WHERE id = ?1",
+            [1],
+            |row| row.get(0),
+        )?;
+
+        assert_eq!(saved_model_id, Some(7));
+
+        Ok(())
+    }
+
+    #[test]
+    fn insert_sensor_with_missing_model_returns_error() -> StorageResult<()> {
+        let store = SqliteSensorStore::open(":memory:")?;
+
+        // Arrange: create and persist a sensor model.
+        let model = SensorModel::new(
+            7,
+            "WIKA".to_string(),
+            "A-10".to_string(),
+            Some("A-10-123".to_string()),
+        )
+        .expect("sensor model must be created");
+
+        store.insert_model(&model)?;
+
+        // Arrange: assign the existing model to a sensor.
+        let mut sensor = Sensor::new(
+            1,
+            "PT-101".to_string(),
+            "Пастеризатор".to_string(),
+        )?;
+
+        sensor.assign_model(999);
+
+        // Act: persist the sensor.
+        let result = store.insert(&sensor);
+
+        assert!(matches!(
+            result,
+            Err(StorageError::Database(
+                rusqlite::Error::SqliteFailure(err, _)
+            )) if err.extended_code
+            == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn find_sensor_restores_model_id() -> StorageResult<()> {
+        let store = SqliteSensorStore::open(":memory:")?;
+
+        // Arrange: create and persist a sensor model.
+        let model = SensorModel::new(
+            7,
+            "WIKA".to_string(),
+            "A-10".to_string(),
+            Some("A-10-123".to_string()),
+        )
+        .expect("sensor model must be created");
+
+        store.insert_model(&model)?;
+
+        // Arrange: assign the existing model to a sensor.
+        let mut sensor = Sensor::new(
+            1,
+            "PT-101".to_string(),
+            "Пастеризатор".to_string(),
+        )?;
+
+        sensor.assign_model(model.id());
+
+        store.insert(&sensor)?;
+
+        let restored = store
+            .find(1)?
+            .expect("sensor must be found");
+
+        assert_eq!(restored.model_id(), Some(7));
 
         Ok(())
     }
